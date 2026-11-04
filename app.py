@@ -80,16 +80,36 @@ LOGIN_HTML = BASE_HTML.replace('{% block content %}{% endblock %}', """
 """).replace('<nav class="navbar navbar-expand-lg mb-4">', '<nav class="navbar navbar-expand-lg mb-4" style="display:none;">')
 
 INDEX_HTML = BASE_HTML.replace('{% block content %}{% endblock %}', """
-<div class="card shadow-sm mb-4">
-    <div class="card-header">Upload Schedule (CSV)</div>
-    <div class="card-body">
-        <form method="POST" action="/upload" enctype="multipart/form-data">
-            <div class="mb-3">
-                <label class="form-label text-muted">You can select multiple CSV files at once to combine months.</label>
-                <input class="form-control" type="file" name="schedule_files" accept=".csv, text/csv, application/vnd.ms-excel, text/comma-separated-values" multiple required>
+<div class="row">
+    <!-- Primary Sync Option -->
+    <div class="col-md-6 mb-4">
+        <div class="card shadow-sm h-100">
+            <div class="card-header" style="background-color: #C5A059;">1. Auto-Sync from ShiftCare</div>
+            <div class="card-body text-center d-flex flex-column justify-content-center p-4">
+                <h5 class="card-title mb-3">Pull Latest Published Shifts</h5>
+                <p class="text-muted mb-4">Automatically download and format upcoming shifts directly from the ShiftCare system.</p>
+                <form method="POST" action="/sync">
+                    <button type="submit" class="btn btn-gold btn-lg w-100" id="syncBtn" onclick="this.innerHTML='<span class=\\'spinner-border spinner-border-sm\\'></span> Syncing...'; this.classList.add('disabled');">Sync Now</button>
+                </form>
             </div>
-            <button type="submit" class="btn btn-primary">Process Schedule</button>
-        </form>
+        </div>
+    </div>
+
+    <!-- Secondary Backup Option -->
+    <div class="col-md-6 mb-4">
+        <div class="card shadow-sm h-100">
+            <div class="card-header">2. Manual CSV Backup</div>
+            <div class="card-body p-4">
+                <h5 class="card-title mb-3">Upload Export Files</h5>
+                <p class="text-muted mb-4">Use this as a fallback. You can select multiple CSV files at once to combine months.</p>
+                <form method="POST" action="/upload" enctype="multipart/form-data">
+                    <div class="mb-3">
+                        <input class="form-control" type="file" name="schedule_files" accept=".csv, text/csv, application/vnd.ms-excel, text/comma-separated-values" multiple required>
+                    </div>
+                    <button type="submit" class="btn btn-outline-primary w-100">Process CSV</button>
+                </form>
+            </div>
+        </div>
     </div>
 </div>
 """)
@@ -333,6 +353,91 @@ def delete_email():
         flash(f"Removed {name} from directory", "success")
     return redirect('/emails')
 
+
+# --- NEW SHIFTCARE API ROUTE ---
+@app.route('/sync', methods=['POST'])
+def sync():
+    if not check_auth(): return redirect('/login')
+    
+    api_key = os.environ.get('SHIFTCARE_API_KEY')
+    if not api_key:
+        flash("ShiftCare API Key is missing. Please add it to your Render environment variables.", "danger")
+        return redirect('/')
+        
+    try:
+        # Standard API request (Note: URL and params may need adjustment based on ShiftCare's latest docs)
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json"
+        }
+        # Instructing the API to only return published shifts
+        params = {"status": "published"} 
+        
+        # NOTE: Replace with the actual endpoint URL provided by ShiftCare support if this differs
+        response = requests.get("https://api.shiftcare.com/v2/shifts", headers=headers, params=params)
+        
+        if response.status_code != 200:
+            flash(f"Failed to connect to ShiftCare API. Status: {response.status_code}", "danger")
+            return redirect('/')
+            
+        raw_data = response.json()
+        
+        # MAPPING JSON TO PANDAS DATAFRAME
+        # Note: If ShiftCare uses different JSON keys (like 'clientName' instead of 'client_name'), update them here.
+        mapped_data = []
+        for shift in raw_data.get('shifts', []): # Assumes data is inside a 'shifts' array
+            mapped_data.append({
+                'Name': shift.get('client_name', 'Unknown'),
+                'Start Date Time': shift.get('start_time'),
+                'End Date Time': shift.get('end_time'),
+                'Staff': shift.get('staff_name', 'Unassigned'),
+                'Shift Status': shift.get('status', 'published')
+            })
+            
+        if not mapped_data:
+            flash("Sync successful, but no upcoming published shifts were found.", "warning")
+            return redirect('/')
+            
+        df = pd.DataFrame(mapped_data)
+        
+        # Save the synced DataFrame so the '/process' route can access it normally
+        filename = f"schedule_api_{uuid.uuid4().hex}.csv"
+        filepath = os.path.join(UPLOAD_FOLDER, filename)
+        df.to_csv(filepath, index=False)
+        
+        # Execute the standard data cleaning and date filtering
+        df = df[df['Shift Status'].str.lower() != 'cancelled']
+        df = df[~df['Staff'].astype(str).str.contains("CANCELLED", case=False, na=False)]
+        
+        df['Start Date Time'] = pd.to_datetime(df['Start Date Time'], errors='coerce', utc=True).dt.tz_convert('Australia/Adelaide')
+        df['End Date Time'] = pd.to_datetime(df['End Date Time'], errors='coerce', utc=True).dt.tz_convert('Australia/Adelaide')
+        df = df.dropna(subset=['Start Date Time', 'End Date Time'])
+        
+        today_start = pd.Timestamp.now('Australia/Adelaide').normalize()
+        df = df[df['Start Date Time'] >= today_start]
+        
+        clients_data = []
+        directory = get_emails()
+        
+        for name, data in df.groupby('Name'):
+            if pd.notna(name):
+                has_email = name in directory
+                emails_str = ", ".join(directory.get(name, []))
+                clients_data.append({
+                    'name': name,
+                    'shifts': len(data),
+                    'has_email': has_email,
+                    'emails': emails_str
+                })
+        
+        clients_data = sorted(clients_data, key=lambda x: x['name'])
+        return render_template_string(SELECT_HTML, clients=clients_data, filename=filename)
+        
+    except Exception as e:
+        flash(f"An error occurred during sync: {str(e)}", "danger")
+        return redirect('/')
+
+
 @app.route('/upload', methods=['POST'])
 def upload():
     if not check_auth(): return redirect('/login')
@@ -361,7 +466,6 @@ def upload():
     try:
         df = pd.concat(dfs, ignore_index=True)
         
-        # Save the combined DataFrame for the process step
         filename = f"schedule_{uuid.uuid4().hex}.csv"
         filepath = os.path.join(UPLOAD_FOLDER, filename)
         df.to_csv(filepath, index=False)
@@ -369,12 +473,10 @@ def upload():
         df = df[df['Shift Status'].str.lower() != 'cancelled']
         df = df[~df['Staff'].astype(str).str.contains("CANCELLED", case=False, na=False)]
         
-        # Convert to Adelaide time and drop blank rows
         df['Start Date Time'] = pd.to_datetime(df['Start Date Time'], errors='coerce', utc=True).dt.tz_convert('Australia/Adelaide')
         df['End Date Time'] = pd.to_datetime(df['End Date Time'], errors='coerce', utc=True).dt.tz_convert('Australia/Adelaide')
         df = df.dropna(subset=['Start Date Time', 'End Date Time'])
         
-        # Filter out anything before today (midnight Adelaide time)
         today_start = pd.Timestamp.now('Australia/Adelaide').normalize()
         df = df[df['Start Date Time'] >= today_start]
         
@@ -416,12 +518,10 @@ def process():
     df = df[df['Shift Status'].str.lower() != 'cancelled']
     df = df[~df['Staff'].astype(str).str.contains("CANCELLED", case=False, na=False)]
     
-    # Convert to Adelaide time and drop blank rows
     df['Start Date Time'] = pd.to_datetime(df['Start Date Time'], errors='coerce', utc=True).dt.tz_convert('Australia/Adelaide')
     df['End Date Time'] = pd.to_datetime(df['End Date Time'], errors='coerce', utc=True).dt.tz_convert('Australia/Adelaide')
     df = df.dropna(subset=['Start Date Time', 'End Date Time'])
     
-    # Filter out anything before today (midnight Adelaide time)
     today_start = pd.Timestamp.now('Australia/Adelaide').normalize()
     df = df[df['Start Date Time'] >= today_start]
     
@@ -438,7 +538,6 @@ def process():
             client_data = df[df['Name'] == name].sort_values(by='Start Date Time')
             if client_data.empty: continue
             
-            # Dynamically determine the months involved
             unique_months = client_data['Start Date Time'].dt.strftime('%B').unique().tolist()
             if len(unique_months) > 1:
                 if len(unique_months) == 2:
