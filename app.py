@@ -354,58 +354,59 @@ def delete_email():
     return redirect('/emails')
 
 
-# --- NEW SHIFTCARE API ROUTE ---
+# --- SHIFTCARE API ROUTE WITH BASIC AUTH ---
 @app.route('/sync', methods=['POST'])
 def sync():
     if not check_auth(): return redirect('/login')
     
     api_key = os.environ.get('SHIFTCARE_API_KEY')
-    if not api_key:
-        flash("ShiftCare API Key is missing. Please add it to your Render environment variables.", "danger")
+    account_id = os.environ.get('SHIFTCARE_ACCOUNT_ID')
+    
+    if not api_key or not account_id:
+        flash("ShiftCare API Key or Account ID is missing from Render environment variables.", "danger")
         return redirect('/')
         
     try:
-        # Standard API request (Note: URL and params may need adjustment based on ShiftCare's latest docs)
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Accept": "application/json"
-        }
-        # Instructing the API to only return published shifts
-        params = {"status": "published"} 
+        # ShiftCare requires HTTP Basic Auth: Account ID as username, API Key as password
+        auth = (account_id, api_key)
+        headers = {"Accept": "application/json"}
         
-        # NOTE: Replace with the actual endpoint URL provided by ShiftCare support if this differs
-        response = requests.get("https://api.shiftcare.com/v2/shifts", headers=headers, params=params)
+        # Correct ShiftCare API endpoint format
+        url = f"https://api.shiftcare.com/v1/accounts/{account_id}/shifts"
+        
+        response = requests.get(url, auth=auth, headers=headers)
         
         if response.status_code != 200:
-            flash(f"Failed to connect to ShiftCare API. Status: {response.status_code}", "danger")
+            flash(f"ShiftCare API Error (Status {response.status_code}): {response.text}", "danger")
             return redirect('/')
             
         raw_data = response.json()
         
-        # MAPPING JSON TO PANDAS DATAFRAME
-        # Note: If ShiftCare uses different JSON keys (like 'clientName' instead of 'client_name'), update them here.
+        # Diagnostic print to render logs in case structure needs mapping adjustments
+        print("RAW SHIFTCARE JSON RESPONSE:", json.dumps(raw_data, indent=2))
+        
         mapped_data = []
-        for shift in raw_data.get('shifts', []): # Assumes data is inside a 'shifts' array
+        shifts_list = raw_data.get('shifts', raw_data.get('data', []))
+        
+        for shift in shifts_list:
             mapped_data.append({
-                'Name': shift.get('client_name', 'Unknown'),
-                'Start Date Time': shift.get('start_time'),
-                'End Date Time': shift.get('end_time'),
-                'Staff': shift.get('staff_name', 'Unassigned'),
+                'Name': shift.get('client_name', shift.get('client', 'Unknown')),
+                'Start Date Time': shift.get('start_time', shift.get('start', '')),
+                'End Date Time': shift.get('end_time', shift.get('end', '')),
+                'Staff': shift.get('staff_name', shift.get('staff', 'Unassigned')),
                 'Shift Status': shift.get('status', 'published')
             })
             
         if not mapped_data:
-            flash("Sync successful, but no upcoming published shifts were found.", "warning")
+            flash("Sync successful, but no shifts were returned by the API.", "warning")
             return redirect('/')
             
         df = pd.DataFrame(mapped_data)
         
-        # Save the synced DataFrame so the '/process' route can access it normally
         filename = f"schedule_api_{uuid.uuid4().hex}.csv"
         filepath = os.path.join(UPLOAD_FOLDER, filename)
         df.to_csv(filepath, index=False)
         
-        # Execute the standard data cleaning and date filtering
         df = df[df['Shift Status'].str.lower() != 'cancelled']
         df = df[~df['Staff'].astype(str).str.contains("CANCELLED", case=False, na=False)]
         
