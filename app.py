@@ -85,7 +85,7 @@ INDEX_HTML = BASE_HTML.replace('{% block content %}{% endblock %}', """
     <div class="card-body">
         <form method="POST" action="/upload" enctype="multipart/form-data">
             <div class="mb-3">
-                <input class="form-control" type="file" name="schedule_file" accept=".csv" required>
+                <input class="form-control" type="file" name="schedule_file" accept=".csv, text/csv, application/vnd.ms-excel, text/comma-separated-values" required>
             </div>
             <button type="submit" class="btn btn-primary">Process Schedule</button>
         </form>
