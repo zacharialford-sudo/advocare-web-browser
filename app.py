@@ -97,23 +97,28 @@ EMAILS_HTML = BASE_HTML.replace('{% block content %}{% endblock %}', """
 <div class="card shadow-sm">
     <div class="card-header">Client Email Directory</div>
     <div class="card-body">
-        <form method="POST" action="/emails" class="mb-4 bg-light p-3 border rounded">
+        <form method="POST" action="/emails" class="mb-4 bg-light p-3 border rounded" id="emailForm">
             <h5>Add or Update Client Email</h5>
             <div class="row g-2 align-items-center">
                 <div class="col-md-5">
-                    <input type="text" name="client_name" class="form-control" placeholder="Exact Client Name" required>
+                    <input type="text" name="client_name" id="client_name_input" class="form-control" placeholder="Exact Client Name" required>
                 </div>
                 <div class="col-md-5">
-                    <input type="text" name="client_emails" class="form-control" placeholder="Emails (comma separated)" required>
+                    <input type="text" name="client_emails" id="client_emails_input" class="form-control" placeholder="Emails (comma separated)" required>
                 </div>
                 <div class="col-md-2">
-                    <button type="submit" class="btn btn-primary w-100">Save</button>
+                    <button type="submit" class="btn btn-primary w-100" id="submitBtn">Save</button>
+                </div>
+            </div>
+            <div class="row mt-2" id="cancelEditRow" style="display: none;">
+                <div class="col-12 text-end">
+                    <button type="button" class="btn btn-sm btn-secondary" onclick="cancelEdit()">Cancel Edit</button>
                 </div>
             </div>
         </form>
         <hr>
         <div class="table-responsive">
-            <table class="table table-striped">
+            <table class="table table-striped align-middle">
                 <thead><tr><th>Client Name</th><th>Configured Emails</th><th>Action</th></tr></thead>
                 <tbody>
                     {% for name, emails in directory.items() %}
@@ -121,6 +126,7 @@ EMAILS_HTML = BASE_HTML.replace('{% block content %}{% endblock %}', """
                         <td>{{ name }}</td>
                         <td>{{ emails | join(', ') }}</td>
                         <td>
+                            <button type="button" class="btn btn-sm btn-info text-white me-2" onclick="editClient('{{ name }}', '{{ emails | join(', ') }}')">Edit</button>
                             <form method="POST" action="/delete_email" style="display:inline;">
                                 <input type="hidden" name="client_name" value="{{ name }}">
                                 <button type="submit" class="btn btn-sm btn-danger">Remove</button>
@@ -133,6 +139,23 @@ EMAILS_HTML = BASE_HTML.replace('{% block content %}{% endblock %}', """
         </div>
     </div>
 </div>
+<script>
+    function editClient(name, emails) {
+        document.getElementById('client_name_input').value = name;
+        document.getElementById('client_emails_input').value = emails;
+        document.getElementById('submitBtn').textContent = 'Update';
+        document.getElementById('cancelEditRow').style.display = 'block';
+        document.getElementById('client_name_input').focus();
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+
+    function cancelEdit() {
+        document.getElementById('client_name_input').value = '';
+        document.getElementById('client_emails_input').value = '';
+        document.getElementById('submitBtn').textContent = 'Save';
+        document.getElementById('cancelEditRow').style.display = 'none';
+    }
+</script>
 """)
 
 SELECT_HTML = BASE_HTML.replace('{% block content %}{% endblock %}', """
