@@ -354,7 +354,7 @@ def delete_email():
     return redirect('/emails')
 
 
-# --- SHIFTCARE API ROUTE WITH BASIC AUTH ---
+# --- UPDATED SHIFTCARE API ROUTE ---
 @app.route('/sync', methods=['POST'])
 def sync():
     if not check_auth(): return redirect('/login')
@@ -367,12 +367,12 @@ def sync():
         return redirect('/')
         
     try:
-        # ShiftCare requires HTTP Basic Auth: Account ID as username, API Key as password
+        # HTTP Basic Auth: Account ID as username, API Key as password
         auth = (account_id, api_key)
         headers = {"Accept": "application/json"}
         
-        # Correct ShiftCare API endpoint format
-        url = f"https://api.shiftcare.com/v1/accounts/{account_id}/shifts"
+        # Trying standard v1/shifts endpoint format
+        url = f"https://api.shiftcare.com/v1/shifts"
         
         response = requests.get(url, auth=auth, headers=headers)
         
@@ -381,12 +381,10 @@ def sync():
             return redirect('/')
             
         raw_data = response.json()
-        
-        # Diagnostic print to render logs in case structure needs mapping adjustments
         print("RAW SHIFTCARE JSON RESPONSE:", json.dumps(raw_data, indent=2))
         
         mapped_data = []
-        shifts_list = raw_data.get('shifts', raw_data.get('data', []))
+        shifts_list = raw_data.get('shifts', raw_data.get('data', raw_data if isinstance(raw_data, list) else []))
         
         for shift in shifts_list:
             mapped_data.append({
