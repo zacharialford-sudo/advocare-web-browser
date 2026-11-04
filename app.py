@@ -371,7 +371,6 @@ def sync():
         start_iso = now_adelaide.normalize().isoformat()
         end_iso = (now_adelaide.normalize() + pd.DateOffset(months=1)).isoformat()
         
-        # --- DIAGNOSTIC LOGGING ---
         print("\n--- SHIFTCARE SYNC INITIATED ---")
         print(f"Requesting shifts from {start_iso} to {end_iso}")
         
@@ -409,31 +408,41 @@ def sync():
                 break
             params['page'] = current_page + 1
         
-        # --- DIAGNOSTIC LOGGING ---
         print(f"Total raw shifts fetched from API: {len(all_shifts)}")
         if len(all_shifts) > 0:
             print(f"Sample of the first shift fetched: {json.dumps(all_shifts[0], indent=2)}")
         
         mapped_data = []
         for shift in all_shifts:
-            # Skip unpublished draft shifts
             if not shift.get('published', True):
                 continue
                 
+            # ROBUST STAFF NAME EXTRACTION
             staff_name = "Unassigned"
             if shift.get('staff') and len(shift['staff']) > 0:
-                staff_name = shift['staff'][0].get('name', 'Unassigned')
+                s = shift['staff'][0]
+                staff_name = s.get('name') or s.get('full_name') or s.get('staff_name')
+                if not staff_name and s.get('first_name'):
+                    staff_name = f"{s.get('first_name', '')} {s.get('family_name', s.get('last_name', ''))}".strip()
+                if not staff_name:
+                    staff_name = "Unassigned"
                 
-            for client in shift.get('clients', []):
+            # ROBUST CLIENT NAME EXTRACTION
+            for c in shift.get('clients', []):
+                client_name = c.get('name') or c.get('full_name') or c.get('client_name')
+                if not client_name and c.get('first_name'):
+                    client_name = f"{c.get('first_name', '')} {c.get('family_name', c.get('last_name', ''))}".strip()
+                if not client_name:
+                    client_name = "Unknown"
+                    
                 mapped_data.append({
-                    'Name': client.get('name', 'Unknown'),
-                    'Start Date Time': shift.get('start_at'),
-                    'End Date Time': shift.get('end_at'),
+                    'Name': client_name,
+                    'Start Date Time': shift.get('start_at') or shift.get('start_time'),
+                    'End Date Time': shift.get('end_at') or shift.get('end_time'),
                     'Staff': staff_name,
                     'Shift Status': 'published'
                 })
         
-        # --- DIAGNOSTIC LOGGING ---
         print(f"Total shifts after mapping clients and skipping drafts: {len(mapped_data)}")
             
         if not mapped_data:
@@ -452,7 +461,6 @@ def sync():
         
         df = df[df['Start Date Time'] >= now_adelaide.normalize()]
         
-        # --- DIAGNOSTIC LOGGING ---
         print(f"Total shifts surviving the future-dates-only filter: {len(df)}")
         
         clients_data = []
