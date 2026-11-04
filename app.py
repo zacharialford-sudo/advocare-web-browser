@@ -354,67 +354,92 @@ def delete_email():
     return redirect('/emails')
 
 
-# --- REGIONAL SHIFTCARE API ROUTE WITH LOGGING ---
 @app.route('/sync', methods=['POST'])
 def sync():
     if not check_auth(): return redirect('/login')
     
-    api_key = os.environ.get('SHIFTCARE_API_KEY')
     account_id = os.environ.get('SHIFTCARE_ACCOUNT_ID')
-    
+    api_key = os.environ.get('SHIFTCARE_API_KEY')
     if not api_key or not account_id:
-        flash("ShiftCare API Key or Account ID is missing from Render environment variables.", "danger")
+        flash("ShiftCare credentials missing. Add SHIFTCARE_ACCOUNT_ID and SHIFTCARE_API_KEY to Render.", "danger")
         return redirect('/')
         
     try:
+        # ShiftCare requires HTTP Basic Auth for standard API keys
         auth = (account_id, api_key)
         headers = {"Accept": "application/json"}
         
-        # Using ShiftCare's Australian regional API domain endpoint
-        url = f"https://api.au.shiftcare.com/v1/shifts"
-        print(f"ATTEMPTING SHIFTCARE CONNECTION TO: {url}")
+        # Adelaide time parameters for the current month
+        now_adelaide = pd.Timestamp.now('Australia/Adelaide')
+        start_iso = now_adelaide.normalize().isoformat()
+        end_iso = (now_adelaide.normalize() + pd.DateOffset(months=1)).isoformat()
         
-        response = requests.get(url, auth=auth, headers=headers)
-        print(f"SHIFTCARE RESPONSE STATUS: {response.status_code}")
-        print(f"SHIFTCARE RESPONSE BODY: {response.text}")
+        # The /v3/shifts endpoint requires fetching all pages (capped at 20 items per page)
+        params = {
+            "status": "approved", # Only pull shifts with verified workers
+            "from_date": start_iso,
+            "to_date": end_iso,
+            "include_clients": "true",
+            "include_staff": "true",
+            "include_metadata": "true",
+            "per_page": 20,
+            "page": 1
+        }
         
-        if response.status_code != 200:
-            flash(f"ShiftCare API Error (Status {response.status_code}): {response.text}", "danger")
-            return redirect('/')
+        all_shifts = []
+        base_url = "https://api.shiftcare.com/api/v3/shifts"
+        
+        while True:
+            response = requests.get(base_url, auth=auth, headers=headers, params=params)
+            if response.status_code != 200:
+                flash(f"ShiftCare API Error: {response.text}", "danger")
+                return redirect('/')
             
-        raw_data = response.json()
+            data = response.json()
+            all_shifts.extend(data)
+            
+            # Check pagination headers to see if we need to fetch another page
+            current_page = int(response.headers.get('Current-Page', 1))
+            total_pages = int(response.headers.get('Total-Pages', 1))
+            
+            if current_page >= total_pages:
+                break
+            params['page'] = current_page + 1
         
+        # Map the ShiftCare JSON to your app's expected pandas format
         mapped_data = []
-        shifts_list = raw_data.get('shifts', raw_data.get('data', raw_data if isinstance(raw_data, list) else []))
-        
-        for shift in shifts_list:
-            mapped_data.append({
-                'Name': shift.get('client_name', shift.get('client', 'Unknown')),
-                'Start Date Time': shift.get('start_time', shift.get('start', '')),
-                'End Date Time': shift.get('end_time', shift.get('end', '')),
-                'Staff': shift.get('staff_name', shift.get('staff', 'Unassigned')),
-                'Shift Status': shift.get('status', 'published')
-            })
+        for shift in all_shifts:
+            staff_name = "Unassigned"
+            if shift.get('staff') and len(shift['staff']) > 0:
+                staff_name = shift['staff'][0].get('name', 'Unassigned')
+                
+            for client in shift.get('clients', []):
+                mapped_data.append({
+                    'Name': client.get('name', 'Unknown'),
+                    'Start Date Time': shift.get('start_at'),
+                    'End Date Time': shift.get('end_at'),
+                    'Staff': staff_name,
+                    'Shift Status': 'published'
+                })
             
         if not mapped_data:
-            flash("Sync successful, but no shifts were returned by the API.", "warning")
+            flash("Sync successful, but no upcoming shifts were found.", "warning")
             return redirect('/')
             
         df = pd.DataFrame(mapped_data)
         
+        # Save the synced DataFrame so the '/process' route can access it normally
         filename = f"schedule_api_{uuid.uuid4().hex}.csv"
         filepath = os.path.join(UPLOAD_FOLDER, filename)
         df.to_csv(filepath, index=False)
         
-        df = df[df['Shift Status'].str.lower() != 'cancelled']
-        df = df[~df['Staff'].astype(str).str.contains("CANCELLED", case=False, na=False)]
-        
+        # Convert to Adelaide time and drop blank rows
         df['Start Date Time'] = pd.to_datetime(df['Start Date Time'], errors='coerce', utc=True).dt.tz_convert('Australia/Adelaide')
         df['End Date Time'] = pd.to_datetime(df['End Date Time'], errors='coerce', utc=True).dt.tz_convert('Australia/Adelaide')
         df = df.dropna(subset=['Start Date Time', 'End Date Time'])
         
-        today_start = pd.Timestamp.now('Australia/Adelaide').normalize()
-        df = df[df['Start Date Time'] >= today_start]
+        # Filter out anything before today (midnight Adelaide time)
+        df = df[df['Start Date Time'] >= now_adelaide.normalize()]
         
         clients_data = []
         directory = get_emails()
@@ -644,7 +669,9 @@ def process():
             send_brevo_email(
                 to_emails=target_emails,
                 subject=subject,
-                html_content=html_body
+                html_content=html_body,
+                attachment_path=doc_filename,
+                filename=doc_filename_short
             )
             
             logs.append(f"SUCCESS: Sent roster to {name} ({', '.join(target_emails)})")
