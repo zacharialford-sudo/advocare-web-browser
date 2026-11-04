@@ -354,7 +354,7 @@ def delete_email():
     return redirect('/emails')
 
 
-# --- UPDATED SHIFTCARE API ROUTE ---
+# --- REGIONAL SHIFTCARE API ROUTE WITH LOGGING ---
 @app.route('/sync', methods=['POST'])
 def sync():
     if not check_auth(): return redirect('/login')
@@ -367,21 +367,22 @@ def sync():
         return redirect('/')
         
     try:
-        # HTTP Basic Auth: Account ID as username, API Key as password
         auth = (account_id, api_key)
         headers = {"Accept": "application/json"}
         
-        # Trying standard v1/shifts endpoint format
-        url = f"https://api.shiftcare.com/v1/shifts"
+        # Using ShiftCare's Australian regional API domain endpoint
+        url = f"https://api.au.shiftcare.com/v1/shifts"
+        print(f"ATTEMPTING SHIFTCARE CONNECTION TO: {url}")
         
         response = requests.get(url, auth=auth, headers=headers)
+        print(f"SHIFTCARE RESPONSE STATUS: {response.status_code}")
+        print(f"SHIFTCARE RESPONSE BODY: {response.text}")
         
         if response.status_code != 200:
             flash(f"ShiftCare API Error (Status {response.status_code}): {response.text}", "danger")
             return redirect('/')
             
         raw_data = response.json()
-        print("RAW SHIFTCARE JSON RESPONSE:", json.dumps(raw_data, indent=2))
         
         mapped_data = []
         shifts_list = raw_data.get('shifts', raw_data.get('data', raw_data if isinstance(raw_data, list) else []))
