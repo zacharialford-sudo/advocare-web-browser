@@ -371,8 +371,11 @@ def sync():
         start_iso = now_adelaide.normalize().isoformat()
         end_iso = (now_adelaide.normalize() + pd.DateOffset(months=1)).isoformat()
         
+        # --- DIAGNOSTIC LOGGING ---
+        print("\n--- SHIFTCARE SYNC INITIATED ---")
+        print(f"Requesting shifts from {start_iso} to {end_iso}")
+        
         params = {
-            "status": "approved",
             "from_date": start_iso,
             "to_date": end_iso,
             "include_clients": "true",
@@ -388,12 +391,12 @@ def sync():
         while True:
             response = requests.get(base_url, auth=auth, headers=headers, params=params)
             if response.status_code != 200:
+                print(f"API HTTP Error: {response.status_code} - {response.text}")
                 flash(f"ShiftCare API Error: {response.text}", "danger")
                 return redirect('/')
             
             data = response.json()
             
-            # FIX: Extract the actual list of shifts from the response dictionary
             if isinstance(data, dict):
                 all_shifts.extend(data.get('shifts', []))
             else:
@@ -406,8 +409,17 @@ def sync():
                 break
             params['page'] = current_page + 1
         
+        # --- DIAGNOSTIC LOGGING ---
+        print(f"Total raw shifts fetched from API: {len(all_shifts)}")
+        if len(all_shifts) > 0:
+            print(f"Sample of the first shift fetched: {json.dumps(all_shifts[0], indent=2)}")
+        
         mapped_data = []
         for shift in all_shifts:
+            # Skip unpublished draft shifts
+            if not shift.get('published', True):
+                continue
+                
             staff_name = "Unassigned"
             if shift.get('staff') and len(shift['staff']) > 0:
                 staff_name = shift['staff'][0].get('name', 'Unassigned')
@@ -420,6 +432,9 @@ def sync():
                     'Staff': staff_name,
                     'Shift Status': 'published'
                 })
+        
+        # --- DIAGNOSTIC LOGGING ---
+        print(f"Total shifts after mapping clients and skipping drafts: {len(mapped_data)}")
             
         if not mapped_data:
             flash("Sync successful, but no upcoming shifts were found.", "warning")
@@ -437,6 +452,9 @@ def sync():
         
         df = df[df['Start Date Time'] >= now_adelaide.normalize()]
         
+        # --- DIAGNOSTIC LOGGING ---
+        print(f"Total shifts surviving the future-dates-only filter: {len(df)}")
+        
         clients_data = []
         directory = get_emails()
         
@@ -452,9 +470,11 @@ def sync():
                 })
         
         clients_data = sorted(clients_data, key=lambda x: x['name'])
+        print("--- SYNC COMPLETE ---\n")
         return render_template_string(SELECT_HTML, clients=clients_data, filename=filename)
         
     except Exception as e:
+        print(f"CRITICAL SYNC ERROR: {str(e)}")
         flash(f"An error occurred during sync: {str(e)}", "danger")
         return redirect('/')
 
