@@ -85,7 +85,8 @@ INDEX_HTML = BASE_HTML.replace('{% block content %}{% endblock %}', """
     <div class="card-body">
         <form method="POST" action="/upload" enctype="multipart/form-data">
             <div class="mb-3">
-                <input class="form-control" type="file" name="schedule_file" accept=".csv, text/csv, application/vnd.ms-excel, text/comma-separated-values" required>
+                <label class="form-label text-muted">You can select multiple CSV files at once to combine months.</label>
+                <input class="form-control" type="file" name="schedule_files" accept=".csv, text/csv, application/vnd.ms-excel, text/comma-separated-values" multiple required>
             </div>
             <button type="submit" class="btn btn-primary">Process Schedule</button>
         </form>
@@ -181,7 +182,7 @@ SELECT_HTML = BASE_HTML.replace('{% block content %}{% endblock %}', """
                 <div class="form-check mb-2">
                     <input class="form-check-input client-checkbox" type="checkbox" name="selected_clients" value="{{ client.name }}" id="chk_{{ loop.index }}" {% if not client.has_email %}disabled{% endif %}>
                     <label class="form-check-label" for="chk_{{ loop.index }}" style="{% if not client.has_email %}color: red;{% endif %}">
-                        <strong>{{ client.name }}</strong> - {{ client.shifts }} shifts 
+                        <strong>{{ client.name }}</strong> - {{ client.shifts }} future shifts 
                         <span class="text-muted">{% if client.has_email %}[{{ client.emails }}]{% else %}[NO EMAIL CONFIGURED]{% endif %}</span>
                     </label>
                 </div>
@@ -335,20 +336,47 @@ def delete_email():
 @app.route('/upload', methods=['POST'])
 def upload():
     if not check_auth(): return redirect('/login')
-    file = request.files.get('schedule_file')
-    if not file or file.filename == '':
+    
+    files = request.files.getlist('schedule_files')
+    if not files or files[0].filename == '':
         flash("No file selected", "danger")
         return redirect('/')
         
-    filename = f"schedule_{uuid.uuid4().hex}.csv"
-    filepath = os.path.join(UPLOAD_FOLDER, filename)
-    file.save(filepath)
-    
+    dfs = []
+    for file in files:
+        if file.filename:
+            temp_filename = f"temp_{uuid.uuid4().hex}.csv"
+            temp_filepath = os.path.join(UPLOAD_FOLDER, temp_filename)
+            file.save(temp_filepath)
+            try:
+                dfs.append(pd.read_csv(temp_filepath))
+            except Exception as e:
+                print(f"Error reading {file.filename}: {e}")
+            os.remove(temp_filepath)
+            
+    if not dfs:
+        flash("No valid CSV files could be read.", "danger")
+        return redirect('/')
+        
     try:
-        df = pd.read_csv(filepath)
+        df = pd.concat(dfs, ignore_index=True)
+        
+        # Save the combined DataFrame for the process step
+        filename = f"schedule_{uuid.uuid4().hex}.csv"
+        filepath = os.path.join(UPLOAD_FOLDER, filename)
+        df.to_csv(filepath, index=False)
+        
         df = df[df['Shift Status'].str.lower() != 'cancelled']
         df = df[~df['Staff'].astype(str).str.contains("CANCELLED", case=False, na=False)]
+        
+        # Convert to Adelaide time and drop blank rows
+        df['Start Date Time'] = pd.to_datetime(df['Start Date Time'], errors='coerce', utc=True).dt.tz_convert('Australia/Adelaide')
+        df['End Date Time'] = pd.to_datetime(df['End Date Time'], errors='coerce', utc=True).dt.tz_convert('Australia/Adelaide')
         df = df.dropna(subset=['Start Date Time', 'End Date Time'])
+        
+        # Filter out anything before today (midnight Adelaide time)
+        today_start = pd.Timestamp.now('Australia/Adelaide').normalize()
+        df = df[df['Start Date Time'] >= today_start]
         
         clients_data = []
         directory = get_emails()
@@ -368,7 +396,7 @@ def upload():
         return render_template_string(SELECT_HTML, clients=clients_data, filename=filename)
         
     except Exception as e:
-        flash(f"Error processing CSV: {str(e)}", "danger")
+        flash(f"Error processing CSV files: {str(e)}", "danger")
         return redirect('/')
 
 @app.route('/process', methods=['POST'])
@@ -387,9 +415,15 @@ def process():
     df = pd.read_csv(filepath)
     df = df[df['Shift Status'].str.lower() != 'cancelled']
     df = df[~df['Staff'].astype(str).str.contains("CANCELLED", case=False, na=False)]
+    
+    # Convert to Adelaide time and drop blank rows
     df['Start Date Time'] = pd.to_datetime(df['Start Date Time'], errors='coerce', utc=True).dt.tz_convert('Australia/Adelaide')
     df['End Date Time'] = pd.to_datetime(df['End Date Time'], errors='coerce', utc=True).dt.tz_convert('Australia/Adelaide')
     df = df.dropna(subset=['Start Date Time', 'End Date Time'])
+    
+    # Filter out anything before today (midnight Adelaide time)
+    today_start = pd.Timestamp.now('Australia/Adelaide').normalize()
+    df = df[df['Start Date Time'] >= today_start]
     
     directory = get_emails()
     logs = []
@@ -404,7 +438,19 @@ def process():
             client_data = df[df['Name'] == name].sort_values(by='Start Date Time')
             if client_data.empty: continue
             
-            month_name = client_data.iloc[0]['Start Date Time'].strftime('%B')
+            # Dynamically determine the months involved
+            unique_months = client_data['Start Date Time'].dt.strftime('%B').unique().tolist()
+            if len(unique_months) > 1:
+                if len(unique_months) == 2:
+                    month_name = f"{unique_months[0]} and {unique_months[1]}"
+                else:
+                    month_name = f"{unique_months[0]} to {unique_months[-1]}"
+                date_phrase = f"for {month_name}"
+                doc_month_label = f"{unique_months[0]}-{unique_months[-1]}"
+            else:
+                month_name = unique_months[0]
+                date_phrase = f"until the end of {month_name}"
+                doc_month_label = month_name
             
             doc = Document()
             style = doc.styles['Normal']
@@ -413,7 +459,7 @@ def process():
             font.size = Pt(11) 
             
             doc.add_paragraph(f"Dear {name},") 
-            doc.add_paragraph(f"Please find below your {amended_word}roster of support until the end of {month_name} for approval:\n") 
+            doc.add_paragraph(f"Please find below your {amended_word}roster of support {date_phrase} for approval:\n") 
             
             table = doc.add_table(rows=1, cols=4)
             table.style = 'Normal Table'
@@ -456,7 +502,7 @@ def process():
             doc.add_paragraph("If you have any concerns or queries, please don't hesitate to contact us  🙂") 
             
             safe_name = str(name).replace("/", "_").replace("\\", "_")
-            doc_filename_short = f"{file_prefix}{safe_name}_{month_name}_Roster.docx"
+            doc_filename_short = f"{file_prefix}{safe_name}_{doc_month_label}_Roster.docx"
             doc_filename = os.path.join(OUTPUT_FOLDER, doc_filename_short)
             doc.save(doc_filename)
             
@@ -470,7 +516,7 @@ def process():
             html_body = f"""
             <div style="font-family: 'Calibri', sans-serif; font-size: 11pt; color: #000000; line-height: 1.2;">
             <p style="margin-top: 0; margin-bottom: 10px;">Dear {name},</p>
-            <p style="margin-top: 0; margin-bottom: 10px;">Please find <b>below</b> your {amended_word}roster of support until the end of {month_name} for approval:</p>
+            <p style="margin-top: 0; margin-bottom: 10px;">Please find <b>below</b> your {amended_word}roster of support {date_phrase} for approval:</p>
             <br>
             <table style="border-collapse: collapse; width: 100%; max-width: 650px; margin-top: 5px; margin-bottom: 15px; border: 1px solid #cccccc;">
                 <tr>
