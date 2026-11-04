@@ -353,7 +353,6 @@ def delete_email():
         flash(f"Removed {name} from directory", "success")
     return redirect('/emails')
 
-
 @app.route('/sync', methods=['POST'])
 def sync():
     if not check_auth(): return redirect('/login')
@@ -365,18 +364,15 @@ def sync():
         return redirect('/')
         
     try:
-        # ShiftCare requires HTTP Basic Auth for standard API keys
         auth = (account_id, api_key)
         headers = {"Accept": "application/json"}
         
-        # Adelaide time parameters for the current month
         now_adelaide = pd.Timestamp.now('Australia/Adelaide')
         start_iso = now_adelaide.normalize().isoformat()
         end_iso = (now_adelaide.normalize() + pd.DateOffset(months=1)).isoformat()
         
-        # The /v3/shifts endpoint requires fetching all pages (capped at 20 items per page)
         params = {
-            "status": "approved", # Only pull shifts with verified workers
+            "status": "approved",
             "from_date": start_iso,
             "to_date": end_iso,
             "include_clients": "true",
@@ -396,9 +392,13 @@ def sync():
                 return redirect('/')
             
             data = response.json()
-            all_shifts.extend(data)
             
-            # Check pagination headers to see if we need to fetch another page
+            # FIX: Extract the actual list of shifts from the response dictionary
+            if isinstance(data, dict):
+                all_shifts.extend(data.get('shifts', []))
+            else:
+                all_shifts.extend(data)
+            
             current_page = int(response.headers.get('Current-Page', 1))
             total_pages = int(response.headers.get('Total-Pages', 1))
             
@@ -406,7 +406,6 @@ def sync():
                 break
             params['page'] = current_page + 1
         
-        # Map the ShiftCare JSON to your app's expected pandas format
         mapped_data = []
         for shift in all_shifts:
             staff_name = "Unassigned"
@@ -428,17 +427,14 @@ def sync():
             
         df = pd.DataFrame(mapped_data)
         
-        # Save the synced DataFrame so the '/process' route can access it normally
         filename = f"schedule_api_{uuid.uuid4().hex}.csv"
         filepath = os.path.join(UPLOAD_FOLDER, filename)
         df.to_csv(filepath, index=False)
         
-        # Convert to Adelaide time and drop blank rows
         df['Start Date Time'] = pd.to_datetime(df['Start Date Time'], errors='coerce', utc=True).dt.tz_convert('Australia/Adelaide')
         df['End Date Time'] = pd.to_datetime(df['End Date Time'], errors='coerce', utc=True).dt.tz_convert('Australia/Adelaide')
         df = df.dropna(subset=['Start Date Time', 'End Date Time'])
         
-        # Filter out anything before today (midnight Adelaide time)
         df = df[df['Start Date Time'] >= now_adelaide.normalize()]
         
         clients_data = []
@@ -461,7 +457,6 @@ def sync():
     except Exception as e:
         flash(f"An error occurred during sync: {str(e)}", "danger")
         return redirect('/')
-
 
 @app.route('/upload', methods=['POST'])
 def upload():
