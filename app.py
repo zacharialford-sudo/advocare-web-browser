@@ -85,11 +85,21 @@ INDEX_HTML = BASE_HTML.replace('{% block content %}{% endblock %}', """
     <div class="col-md-6 mb-4">
         <div class="card shadow-sm h-100">
             <div class="card-header" style="background-color: #C5A059;">1. Auto-Sync from ShiftCare</div>
-            <div class="card-body text-center d-flex flex-column justify-content-center p-4">
-                <h5 class="card-title mb-3">Pull Latest Published Shifts</h5>
-                <p class="text-muted mb-4">Automatically download and format upcoming shifts directly from the ShiftCare system.</p>
+            <div class="card-body p-4">
+                <h5 class="card-title mb-3 text-center">Pull Latest Published Shifts</h5>
+                <p class="text-muted mb-4 text-center">Select the exact date range to fetch from the ShiftCare system.</p>
                 <form method="POST" action="/sync">
-                    <button type="submit" class="btn btn-gold btn-lg w-100" id="syncBtn" onclick="this.innerHTML='<span class=\\'spinner-border spinner-border-sm\\'></span> Syncing...'; this.classList.add('disabled');">Sync Now</button>
+                    <div class="row g-2 mb-3">
+                        <div class="col-6">
+                            <label class="form-label small fw-bold">Start Date</label>
+                            <input type="date" name="sync_start" id="sync_start" class="form-control" required>
+                        </div>
+                        <div class="col-6">
+                            <label class="form-label small fw-bold">End Date</label>
+                            <input type="date" name="sync_end" id="sync_end" class="form-control" required>
+                        </div>
+                    </div>
+                    <button type="submit" class="btn btn-gold btn-lg w-100" id="syncBtn" onclick="if(this.form.checkValidity()){ this.innerHTML='<span class=\\'spinner-border spinner-border-sm\\'></span> Syncing...'; this.classList.add('disabled'); }">Sync Now</button>
                 </form>
             </div>
         </div>
@@ -99,7 +109,7 @@ INDEX_HTML = BASE_HTML.replace('{% block content %}{% endblock %}', """
     <div class="col-md-6 mb-4">
         <div class="card shadow-sm h-100">
             <div class="card-header">2. Manual CSV Backup</div>
-            <div class="card-body p-4">
+            <div class="card-body p-4 text-center">
                 <h5 class="card-title mb-3">Upload Export Files</h5>
                 <p class="text-muted mb-4">Use this as a fallback. You can select multiple CSV files at once to combine months.</p>
                 <form method="POST" action="/upload" enctype="multipart/form-data">
@@ -112,6 +122,24 @@ INDEX_HTML = BASE_HTML.replace('{% block content %}{% endblock %}', """
         </div>
     </div>
 </div>
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        let today = new Date();
+        let startInput = document.getElementById('sync_start');
+        let endInput = document.getElementById('sync_end');
+        if(startInput && endInput) {
+            // Format YYYY-MM-DD for the HTML date inputs
+            startInput.value = today.toISOString().split('T')[0];
+            
+            // Calculate the last day of the current month
+            let endOfMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+            
+            // Handle timezone offset to ensure the local date is picked correctly
+            let endOfMonthLocal = new Date(endOfMonth.getTime() - (endOfMonth.getTimezoneOffset() * 60000));
+            endInput.value = endOfMonthLocal.toISOString().split('T')[0];
+        }
+    });
+</script>
 """)
 
 EMAILS_HTML = BASE_HTML.replace('{% block content %}{% endblock %}', """
@@ -202,7 +230,7 @@ SELECT_HTML = BASE_HTML.replace('{% block content %}{% endblock %}', """
                 <div class="form-check mb-2">
                     <input class="form-check-input client-checkbox" type="checkbox" name="selected_clients" value="{{ client.name }}" id="chk_{{ loop.index }}" {% if not client.has_email %}disabled{% endif %}>
                     <label class="form-check-label" for="chk_{{ loop.index }}" style="{% if not client.has_email %}color: red;{% endif %}">
-                        <strong>{{ client.name }}</strong> - {{ client.shifts }} future shifts 
+                        <strong>{{ client.name }}</strong> - {{ client.shifts }} shifts 
                         <span class="text-muted">{% if client.has_email %}[{{ client.emails }}]{% else %}[NO EMAIL CONFIGURED]{% endif %}</span>
                     </label>
                 </div>
@@ -273,7 +301,7 @@ def save_emails(directory):
     except Exception as e:
         print(f"Google Sheets Error: {e}")
 
-def send_brevo_email(to_emails, subject, html_content, attachment_path=None, filename=None):
+def send_brevo_email(to_emails, subject, html_content):
     api_key = os.environ.get('BREVO_API_KEY')
     if not api_key:
         raise Exception("BREVO_API_KEY missing.")
@@ -286,11 +314,6 @@ def send_brevo_email(to_emails, subject, html_content, attachment_path=None, fil
         "subject": subject,
         "htmlContent": html_content
     }
-    
-    if attachment_path and filename:
-        with open(attachment_path, "rb") as f:
-            encoded_file = base64.b64encode(f.read()).decode('utf-8')
-        payload["attachment"] = [{"name": filename, "content": encoded_file}]
         
     headers = {
         "accept": "application/json",
@@ -363,13 +386,24 @@ def sync():
         flash("ShiftCare credentials missing. Add SHIFTCARE_ACCOUNT_ID and SHIFTCARE_API_KEY to Render.", "danger")
         return redirect('/')
         
+    sync_start = request.form.get('sync_start')
+    sync_end = request.form.get('sync_end')
+    
+    if not sync_start or not sync_end:
+        flash("Please provide both start and end dates.", "danger")
+        return redirect('/')
+        
     try:
+        tz = 'Australia/Adelaide'
+        # Parse start and end dates from the HTML form to valid Adelaide bounds
+        start_dt = pd.to_datetime(sync_start).tz_localize(tz)
+        end_dt = pd.to_datetime(sync_end).tz_localize(tz) + pd.Timedelta(days=1, seconds=-1)
+        
+        start_iso = start_dt.isoformat()
+        end_iso = end_dt.isoformat()
+        
         auth = (account_id, api_key)
         headers = {"Accept": "application/json"}
-        
-        now_adelaide = pd.Timestamp.now('Australia/Adelaide')
-        start_iso = now_adelaide.normalize().isoformat()
-        end_iso = (now_adelaide.normalize() + pd.DateOffset(months=1)).isoformat()
         
         print("\n--- SHIFTCARE SYNC INITIATED ---")
         print(f"Requesting shifts from {start_iso} to {end_iso}")
@@ -409,15 +443,12 @@ def sync():
             params['page'] = current_page + 1
         
         print(f"Total raw shifts fetched from API: {len(all_shifts)}")
-        if len(all_shifts) > 0:
-            print(f"Sample of the first shift fetched: {json.dumps(all_shifts[0], indent=2)}")
         
         mapped_data = []
         for shift in all_shifts:
             if not shift.get('published', True):
                 continue
                 
-            # ROBUST STAFF NAME EXTRACTION
             staff_name = "Unassigned"
             if shift.get('staff') and len(shift['staff']) > 0:
                 s = shift['staff'][0]
@@ -427,13 +458,21 @@ def sync():
                 if not staff_name:
                     staff_name = "Unassigned"
                 
-            # ROBUST CLIENT NAME EXTRACTION
+            # ROBUST CLIENT NAME EXTRACTION (DROPPING NDIS TAGS)
             for c in shift.get('clients', []):
-                client_name = c.get('name') or c.get('full_name') or c.get('client_name')
-                if not client_name and c.get('first_name'):
-                    client_name = f"{c.get('first_name', '')} {c.get('family_name', c.get('last_name', ''))}".strip()
-                if not client_name:
-                    client_name = "Unknown"
+                fname = str(c.get('first_name', '')).strip()
+                lname_raw = str(c.get('family_name', c.get('last_name', ''))).strip()
+                
+                lname = ""
+                if lname_raw:
+                    first_word = lname_raw.split()[0]
+                    if 'NDIS' not in first_word.upper():
+                        lname = first_word
+
+                if fname or lname:
+                    client_name = f"{fname} {lname}".strip()
+                else:
+                    client_name = str(c.get('name') or c.get('full_name') or 'Unknown').split(' NDIS')[0].strip()
                     
                 mapped_data.append({
                     'Name': client_name,
@@ -446,7 +485,7 @@ def sync():
         print(f"Total shifts after mapping clients and skipping drafts: {len(mapped_data)}")
             
         if not mapped_data:
-            flash("Sync successful, but no upcoming shifts were found.", "warning")
+            flash(f"Sync successful, but no published shifts were found between {sync_start} and {sync_end}.", "warning")
             return redirect('/')
             
         df = pd.DataFrame(mapped_data)
@@ -459,9 +498,10 @@ def sync():
         df['End Date Time'] = pd.to_datetime(df['End Date Time'], errors='coerce', utc=True).dt.tz_convert('Australia/Adelaide')
         df = df.dropna(subset=['Start Date Time', 'End Date Time'])
         
-        df = df[df['Start Date Time'] >= now_adelaide.normalize()]
+        # Enforce exact bounds requested by user
+        df = df[(df['Start Date Time'] >= start_dt) & (df['Start Date Time'] <= end_dt)]
         
-        print(f"Total shifts surviving the future-dates-only filter: {len(df)}")
+        print(f"Total shifts surviving the exact-date filter: {len(df)}")
         
         clients_data = []
         directory = get_emails()
@@ -528,6 +568,9 @@ def upload():
         today_start = pd.Timestamp.now('Australia/Adelaide').normalize()
         df = df[df['Start Date Time'] >= today_start]
         
+        # Clean Name column in CSV exports to match the sync logic
+        df['Name'] = df['Name'].astype(str).apply(lambda x: x.split(' NDIS')[0].strip())
+        
         clients_data = []
         directory = get_emails()
         
@@ -572,6 +615,9 @@ def process():
     
     today_start = pd.Timestamp.now('Australia/Adelaide').normalize()
     df = df[df['Start Date Time'] >= today_start]
+    
+    # Ensure CSV names are clean during final generation too
+    df['Name'] = df['Name'].astype(str).apply(lambda x: x.split(' NDIS')[0].strip())
     
     directory = get_emails()
     logs = []
@@ -692,9 +738,7 @@ def process():
             send_brevo_email(
                 to_emails=target_emails,
                 subject=subject,
-                html_content=html_body,
-                attachment_path=doc_filename,
-                filename=doc_filename_short
+                html_content=html_body
             )
             
             logs.append(f"SUCCESS: Sent roster to {name} ({', '.join(target_emails)})")
