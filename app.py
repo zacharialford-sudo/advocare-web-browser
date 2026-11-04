@@ -229,22 +229,25 @@ def save_emails(directory):
     except Exception as e:
         print(f"Google Sheets Error: {e}")
 
-def send_brevo_email(to_emails, subject, html_content, attachment_path, filename):
+def send_brevo_email(to_emails, subject, html_content, attachment_path=None, filename=None):
     api_key = os.environ.get('BREVO_API_KEY')
     if not api_key:
         raise Exception("BREVO_API_KEY missing.")
         
     url = "https://api.brevo.com/v3/smtp/email"
-    with open(attachment_path, "rb") as f:
-        encoded_file = base64.b64encode(f.read()).decode('utf-8')
-        
+    
     payload = {
         "sender": {"name": "Advocare SA", "email": "rostering@advocaresa.com.au"},
         "to": [{"email": e} for e in to_emails],
         "subject": subject,
-        "htmlContent": html_content,
-        "attachment": [{"name": filename, "content": encoded_file}]
+        "htmlContent": html_content
     }
+    
+    if attachment_path and filename:
+        with open(attachment_path, "rb") as f:
+            encoded_file = base64.b64encode(f.read()).decode('utf-8')
+        payload["attachment"] = [{"name": filename, "content": encoded_file}]
+        
     headers = {
         "accept": "application/json",
         "api-key": api_key,
@@ -427,7 +430,7 @@ def process():
                 </tr>"""
             
             doc.add_paragraph("\nAll look OK?") 
-            doc.add_paragraph("If you have any concerns or queries, please don’t hesitate to contact us  🙂") 
+            doc.add_paragraph("If you have any concerns or queries, please don't hesitate to contact us  🙂") 
             
             safe_name = str(name).replace("/", "_").replace("\\", "_")
             doc_filename_short = f"{file_prefix}{safe_name}_{month_name}_Roster.docx"
@@ -473,9 +476,7 @@ def process():
             send_brevo_email(
                 to_emails=target_emails,
                 subject=subject,
-                html_content=html_body,
-                attachment_path=doc_filename,
-                filename=doc_filename_short
+                html_content=html_body
             )
             
             logs.append(f"SUCCESS: Sent roster to {name} ({', '.join(target_emails)})")
@@ -488,7 +489,7 @@ def process():
         admin_email = os.environ.get('ADMIN_EMAIL', 'rostering@advocaresa.com.au')
         confirm_subject = f"Roster Run Complete - {success_count} Sent"
         confirm_body = f"<p>Roster Dispatch Summary:</p><pre>" + "\n".join(logs) + "</pre>"
-        send_brevo_email([admin_email], confirm_subject, confirm_body, doc_filename, "last_generated_roster.docx")
+        send_brevo_email([admin_email], confirm_subject, confirm_body)
     except Exception as e:
         print(f"Failed to send admin confirmation: {e}")
 
